@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wylto Chat</title>
+  <script src="https://live.zwidgets.com/js-sdk/1.2/ZohoEmbededAppSDK.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 12px; }
+    .container { width: 100%; min-height: 400px; }
+    .connect-form { max-width: 400px; }
+    .connect-form label { display: block; margin-bottom: 4px; font-weight: 500; }
+    .connect-form input { width: 100%; padding: 8px 12px; margin-bottom: 12px; border: 1px solid #ccc; border-radius: 4px; }
+    .connect-form button { padding: 10px 20px; background: #0d6efd; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .connect-form button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .message { padding: 12px; margin: 8px 0; border-radius: 4px; }
+    .message.error { background: #f8d7da; color: #721c24; }
+    .message.success { background: #d4edda; color: #155724; }
+    #chat-iframe { width: 100%; height: 600px; border: none; border-radius: 4px; }
+    .no-phone { padding: 12px; background: #fff3cd; color: #856404; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="connect-screen">
+      <h3 style="margin-top:0;">Connect Wylto</h3>
+      <p>Enter your Wylto API token (from wylto.com → Settings → API Tokens).</p>
+      <div class="connect-form">
+        <label for="token-input">Wylto API Token</label>
+        <input type="password" id="token-input" placeholder="Paste your API token from wylto.com" autocomplete="off" />
+        <div id="connect-message"></div>
+        <button id="connect-btn">Connect</button>
+      </div>
+    </div>
+    <div id="chat-screen" style="display:none;">
+      <div id="chat-placeholder">
+        <p>Loading chat...</p>
+      </div>
+      <iframe id="chat-iframe" style="display:none;" title="Wylto Chat"></iframe>
+      <div id="no-phone-msg" class="no-phone" style="display:none;">
+        This record has no phone number. Add a phone number to see the WhatsApp chat.
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      var WYLTO_VALIDATE_URL = 'https://server.wylto.com/api/v1/zoho/validate-token';
+      var WYLTO_INBOX_BASE = 'https://inbox.wylto.com';
+      var ORG_VAR_NAMESPACE = 'wylto';
+
+      function show(el) { if (el) el.style.display = ''; }
+      function hide(el) { if (el) el.style.display = 'none'; }
+      function showConnectScreen() {
+        hide(document.getElementById('chat-screen'));
+        show(document.getElementById('connect-screen'));
+      }
+      function showChatScreen() {
+        hide(document.getElementById('connect-screen'));
+        show(document.getElementById('chat-screen'));
+      }
+
+      function normalizePhone(phone) {
+        if (!phone || typeof phone !== 'string') return '';
+        return phone.replace(/\D/g, '');
+      }
+
+      function getSavedToken(cb) {
+        if (typeof ZOHO === 'undefined' || !ZOHO.CRM || !ZOHO.CRM.API) {
+          try {
+            var local = localStorage.getItem('wylto_token');
+            return cb(local || null);
+          } catch (e) { return cb(null); }
+        }
+        ZOHO.CRM.API.getOrgVariable(ORG_VAR_NAMESPACE).then(function(data) {
+          var token = null;
+          if (data && data.Success && data.Success.Content) {
+            try {
+              var content = typeof data.Success.Content === 'string' ? JSON.parse(data.Success.Content) : data.Success.Content;
+              token = content && content.wylto_token ? content.wylto_token : null;
+            } catch (e) {
+              token = data.Success.Content.wylto_token || null;
+            }
+          }
+          if (!token) token = localStorage.getItem('wylto_token');
+          cb(token || null);
+        }).catch(function() {
+          var local = localStorage.getItem('wylto_token');
+          cb(local || null);
+        });
+      }
+
+      function saveToken(token, cb) {
+        try { localStorage.setItem('wylto_token', token); } catch (e) {}
+        if (typeof ZOHO !== 'undefined' && ZOHO.CRM && ZOHO.CRM.API && typeof ZOHO.CRM.API.setOrgVariable === 'function') {
+          var payload = JSON.stringify({ wylto_token: token });
+          ZOHO.CRM.API.setOrgVariable(ORG_VAR_NAMESPACE, payload).then(function() { if (cb) cb(); }).catch(function() { if (cb) cb(); });
+        } else {
+          if (cb) cb();
+        }
+      }
+
+      function validateToken(token, cb) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', WYLTO_VALIDATE_URL, true);
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          var ok = xhr.status >= 200 && xhr.status < 300;
+          var body = null;
+          try { body = JSON.parse(xhr.responseText || '{}'); } catch (e) {}
+          cb(ok, body);
+        };
+        xhr.onerror = function() { cb(false, null); };
+        xhr.send(JSON.stringify({ token: token }));
+      }
+
+      function renderConnect() {
+        var msgEl = document.getElementById('connect-message');
+        var btn = document.getElementById('connect-btn');
+        btn.onclick = function() {
+          var token = (document.getElementById('token-input').value || '').trim();
+          if (!token) {
+            msgEl.className = 'message error';
+            msgEl.textContent = 'Please enter your Wylto API token.';
+            msgEl.style.display = 'block';
+            return;
+          }
+          msgEl.textContent = 'Validating...';
+          msgEl.className = 'message';
+          msgEl.style.display = 'block';
+          btn.disabled = true;
+          validateToken(token, function(ok, body) {
+            btn.disabled = false;
+            if (ok) {
+              saveToken(token, function() {
+                msgEl.className = 'message success';
+                msgEl.textContent = 'Connected! You can now view chats on Lead/Contact records.';
+                document.getElementById('token-input').value = '';
+                setTimeout(function() {
+                  showChatScreen();
+                  try { ZOHO.embeddedApp.refresh(); } catch (e) {}
+                }, 800);
+              });
+            } else {
+              msgEl.className = 'message error';
+              msgEl.textContent = (body && body.message) ? body.message : 'Invalid token. Check your token and try again.';
+            }
+          });
+        };
+      }
+
+      function loadChat(entity, recordId, token) {
+        if (typeof ZOHO === 'undefined' || !ZOHO.CRM || !ZOHO.CRM.API) {
+          document.getElementById('chat-placeholder').innerHTML = '<p>Zoho SDK not available. Open this widget from a Lead or Contact record.</p>';
+          return;
+        }
+        ZOHO.CRM.API.getRecord({ Entity: entity, RecordID: recordId }).then(function(res) {
+          var record = (res && res.data && res.data[0]) ? res.data[0] : null;
+          var phone = (record && (record.Phone || record.Mobile)) ? (record.Phone || record.Mobile) : '';
+          var normalized = normalizePhone(phone);
+          var iframe = document.getElementById('chat-iframe');
+          var noPhone = document.getElementById('no-phone-msg');
+          var placeholder = document.getElementById('chat-placeholder');
+          if (!normalized) {
+            hide(iframe);
+            show(noPhone);
+            hide(placeholder);
+            return;
+          }
+          hide(noPhone);
+          hide(placeholder);
+          var url = WYLTO_INBOX_BASE + '?token=' + encodeURIComponent(token) + '&open_chat=' + encodeURIComponent(normalized);
+          iframe.src = url;
+          show(iframe);
+        }).catch(function() {
+          document.getElementById('chat-placeholder').innerHTML = '<p>Could not load record. Make sure you are on a Lead or Contact detail page.</p>';
+        });
+      }
+
+      function init() {
+        renderConnect();
+        getSavedToken(function(token) {
+          if (!token) {
+            showConnectScreen();
+            return;
+          }
+          showChatScreen();
+          ZOHO.embeddedApp.on('PageLoad', function(data) {
+            var entity = (data && data.Entity) ? data.Entity : null;
+            var entityId = (data && data.EntityId) ? data.EntityId : null;
+            if (entity && entityId) {
+              document.getElementById('chat-placeholder').innerHTML = '<p>Loading chat...</p>';
+              document.getElementById('chat-placeholder').style.display = 'block';
+              hide(document.getElementById('chat-iframe'));
+              hide(document.getElementById('no-phone-msg'));
+              loadChat(entity, entityId, token);
+            } else {
+              document.getElementById('chat-placeholder').innerHTML = '<p>Open a Lead or Contact record to see the chat.</p>';
+            }
+          });
+          ZOHO.embeddedApp.init();
+        });
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+      } else {
+        init();
+      }
+    })();
+  </script>
+</body>
+</html>
